@@ -1,11 +1,20 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "jumpabout",
+  "main": "worker/index.js",
   "compatibility_date": "2026-10-01",
   "observability": {
     "enabled": true
   },
   "assets": {
-    "directory": "."
-  }
+    "directory": ".",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "jumpabout",
+      "database_id": "2082539d-fd56-4b1b-9077-295560d17e5d"
+    }
+  ]
 }

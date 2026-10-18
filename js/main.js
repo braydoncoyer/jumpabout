@@ -51,6 +51,38 @@
   }
   function topScore() { var l = loadScores(); return l.length ? l[0].score : 0; }
 
+  // ---- global leaderboard (Cloudflare Worker + D1) ---------------------------------
+  var API = '/api/scores';
+  var board = { tab: 'global', list: null, status: 'idle', msg: '', myId: null };
+
+  function fetchGlobal() {
+    if (location.protocol === 'file:') { board.status = 'offline'; return; }
+    board.status = 'loading';
+    fetch(API).then(function (r) { return r.json(); }).then(function (d) {
+      board.list = d.top || []; board.status = 'ok';
+    }).catch(function () { board.status = 'offline'; });
+  }
+
+  function postGlobal(entry) {
+    if (location.protocol === 'file:') { board.status = 'offline'; return; }
+    board.status = 'posting'; board.msg = '';
+    fetch(API, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: entry.name, score: entry.score, level: entry.level, speed: entry.speed })
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); }).then(function (res) {
+      if (res.ok) { board.list = res.d.top; board.myId = res.d.id; board.status = 'ok'; board.msg = 'GLOBAL RANK #' + res.d.rank; }
+      else { board.status = 'ok'; board.msg = 'NOT POSTED: ' + String(res.d.error || 'ERROR').toUpperCase(); fetchGlobal(); }
+    }).catch(function () { board.status = 'offline'; board.msg = 'NOT POSTED: OFFLINE'; });
+  }
+
+  function savedInitials() {
+    try {
+      var v = localStorage.getItem('jumpabout.initials') || '';
+      if (v.length === 3) return v.split('').map(function (ch) { return Math.max(0, ALPHA.indexOf(ch)); });
+    } catch (e) { /* storage blocked */ }
+    return [0, 0, 0];
+  }
+
   // ---- input --------------------------------------------------------------
   var keys = {};
   var jumpQueued = 0, jumpPressMode = null;
@@ -169,9 +201,9 @@
   }
 
   function finishGame() {
-    var pending = players.filter(function (p) { return qualifies(p.score); });
+    var pending = players.filter(function (p) { return p.score > 0; });
     if (pending.length) {
-      nameEntry = { queue: pending, chars: [0, 0, 0], pos: 0 };
+      nameEntry = { queue: pending, chars: savedInitials(), pos: 0 };
       setState('name');
     } else {
       lastRank = -1;
@@ -230,7 +262,7 @@
       } else if (c === 'Space' || c === 'Enter') {
         sfx.select();
         if (menu.idx <= 3) newGame();
-        else if (menu.idx === 4) { lastRank = -1; setState('scores'); }
+        else if (menu.idx === 4) { lastRank = -1; board.myId = null; board.msg = ''; board.tab = 'global'; fetchGlobal(); setState('scores'); }
         else { helpPage = 0; setState('help'); }
       }
       return;
@@ -243,7 +275,14 @@
       sfx.menu();
       return;
     }
-    if (state === 'scores') { if (stateT > 20) setState('title'); return; }
+    if (state === 'scores') {
+      if (c === 'KeyA' || c === 'ArrowLeft' || c === 'KeyD' || c === 'ArrowRight') {
+        board.tab = board.tab === 'global' ? 'local' : 'global';
+        if (board.tab === 'global' && board.status !== 'loading' && board.status !== 'posting') fetchGlobal();
+        sfx.menu();
+      } else if (stateT > 20) setState('title');
+      return;
+    }
     if (state === 'play') {
       if (c === 'Escape' || c === 'KeyP') { setState('pause'); return; }
     } else if (state === 'pause') {
@@ -268,15 +307,22 @@
     else if (c === 'KeyS' || c === 'ArrowDown') { n.chars[n.pos] = (n.chars[n.pos] + ALPHA.length - 1) % ALPHA.length; sfx.menu(); }
     else if (c === 'KeyA' || c === 'ArrowLeft' || c === 'Backspace') { n.pos = Math.max(0, n.pos - 1); sfx.menu(); }
     else if (c === 'KeyD' || c === 'ArrowRight') { n.pos = Math.min(2, n.pos + 1); sfx.menu(); }
+    else if (c === 'Escape') {
+      // skip: nothing saved or posted for this player
+      n.queue.shift();
+      if (n.queue.length) { n.chars = savedInitials(); n.pos = 0; } else { lastRank = -1; board.msg = ''; setState('scores'); }
+    }
     else if (c === 'Space' || c === 'Enter') {
       if (n.pos < 2 && c === 'Space') { n.pos++; sfx.menu(); return; }
       var pl = n.queue.shift();
       var name = n.chars.map(function (i) { return ALPHA[i]; }).join('');
       var entry = { name: name, score: pl.score, level: pl.done + 1, speed: pl.speed, date: Date.now() };
-      lastRank = addScore(entry);
+      lastRank = qualifies(entry.score) ? addScore(entry) : -1;
+      try { localStorage.setItem('jumpabout.initials', name); } catch (err) { /* storage blocked */ }
+      postGlobal(entry);
       sfx.select();
-      if (n.queue.length) { n.chars = [0, 0, 0]; n.pos = 0; }
-      else setState('scores');
+      if (n.queue.length) { n.chars = savedInitials(); n.pos = 0; }
+      else { board.tab = 'global'; setState('scores'); }
     } else if (/^Key[A-Z]$/.test(c) && c !== 'KeyW' && c !== 'KeyA' && c !== 'KeyS' && c !== 'KeyD') {
       n.chars[n.pos] = ALPHA.indexOf(c.slice(3));
       n.pos = Math.min(2, n.pos + 1);
@@ -550,7 +596,9 @@
     if (menu.idx === 2) txt('SPEED ' + menu.speed + ' = ' + sp, W / 2, 184, TEAL, { align: 'center' });
     if (menu.idx === 3) txt(LEVELS[menu.level - 1].name, W / 2, 184, TEAL, { align: 'center' });
 
-    txt('HIGH SCORE ' + pad(topScore(), 6), W / 2, 200, WHITE, { align: 'center' });
+    var best = board.list && board.list[0];
+    txt(best ? 'WORLD BEST ' + best.name + ' ' + pad(best.score, 6) + '   YOURS ' + pad(topScore(), 6)
+             : 'HIGH SCORE ' + pad(topScore(), 6), W / 2, 200, WHITE, { align: 'center' });
     ctx.fillStyle = '#2050c0'; ctx.fillRect(0, 216, W, 32);
     txt('WASD MOVE / CLIMB   SPACE JUMP', W / 2, 221, WHITE, { align: 'center' });
     txt('P PAUSE   M SOUND   A TRIBUTE TO 1983', W / 2, 233, '#c0d8ff', { align: 'center' });
@@ -609,23 +657,36 @@
   }
 
   function drawScores() {
-    var list = loadScores();
-    txt('HIGH SCORES', W / 2, 14, TEAL, { align: 'center', scale: 2 });
-    txt('RANK  NAME  SCORE   LEVEL  SPEED', MARGIN + 40, 42, DIM);
-    for (var i = 0; i < 10; i++) {
-      var e = list[i], y = 56 + i * 14;
-      var hl = i === lastRank && (stateT >> 4) % 2 === 0;
-      var c = hl ? YELLOW : i === 0 ? '#ffd070' : WHITE;
-      txt(pad(i + 1, 2) + '.', MARGIN + 46, y, c);
-      if (e) {
-        txt(e.name, MARGIN + 76, y, c);
-        txt(pad(e.score, 6), MARGIN + 112, y, c);
-        txt(pad(e.level, 2), MARGIN + 172, y, c);
-        txt(String(e.speed), MARGIN + 220, y, c);
-      } else txt('---   ------    --     -', MARGIN + 76, y, '#404050');
+    var global = board.tab === 'global';
+    txt('HIGH SCORES', W / 2, 10, TEAL, { align: 'center', scale: 2 });
+    txt('LOCAL', W / 2 - 40, 30, global ? DIM : YELLOW, { align: 'center' });
+    txt('GLOBAL', W / 2 + 40, 30, global ? YELLOW : DIM, { align: 'center' });
+    ctx.fillStyle = YELLOW; ctx.fillRect(global ? W / 2 + 22 : W / 2 - 55, 39, global ? 36 : 30, 1);
+    txt('RANK  NAME  SCORE   LEVEL  SPEED', MARGIN + 40, 46, DIM);
+
+    var list = global ? (board.list || []) : loadScores();
+    if (global && !board.list) {
+      var m = board.status === 'offline' ? 'GLOBAL SCORES UNAVAILABLE OFFLINE' : 'LOADING...';
+      txt(m, W / 2, 120, DIM, { align: 'center' });
+    } else {
+      for (var i = 0; i < 10; i++) {
+        var e = list[i], y = 60 + i * 14;
+        var mine = global ? e && e.id === board.myId : i === lastRank;
+        var hl = mine && (stateT >> 4) % 2 === 0;
+        var c = hl ? YELLOW : i === 0 ? '#ffd070' : WHITE;
+        txt(pad(i + 1, 2) + '.', MARGIN + 46, y, c);
+        if (e) {
+          txt(e.name, MARGIN + 76, y, c);
+          txt(pad(e.score, 6), MARGIN + 112, y, c);
+          txt(pad(e.level, 2), MARGIN + 172, y, c);
+          txt(String(e.speed), MARGIN + 220, y, c);
+        } else txt('---   ------    --     -', MARGIN + 76, y, '#404050');
+      }
     }
+    if (board.status === 'posting') txt('POSTING SCORE...', W / 2, 204, TEAL, { align: 'center' });
+    else if (board.msg) txt(board.msg, W / 2, 204, board.msg.indexOf('NOT') === 0 ? '#ff7070' : TEAL, { align: 'center' });
     ctx.fillStyle = PURPLE; ctx.fillRect(0, 216, W, 32);
-    txt('PRESS ANY KEY', W / 2, 228, WHITE, { align: 'center' });
+    txt('A/D: LOCAL / GLOBAL    ANY KEY: MENU', W / 2, 228, WHITE, { align: 'center' });
   }
 
   function drawTally() {
@@ -656,7 +717,7 @@
 
   function drawNameEntry() {
     var n = nameEntry, pl = n.queue[0];
-    txt('NEW HIGH SCORE', W / 2, 30, YELLOW, { align: 'center', scale: 2 });
+    txt(qualifies(pl.score) ? 'NEW HIGH SCORE' : 'FINAL SCORE', W / 2, 30, YELLOW, { align: 'center', scale: 2 });
     if (players.length > 1) txt('PLAYER ' + pl.num, W / 2, 56, WHITE, { align: 'center' });
     txt(String(pl.score), W / 2, 72, WHITE, { align: 'center', scale: 2 });
     txt('ENTER YOUR INITIALS', W / 2, 104, TEAL, { align: 'center' });
@@ -666,7 +727,8 @@
       if (sel && (stateT >> 3) % 2) { ctx.fillStyle = YELLOW; ctx.fillRect(x, 150, 14, 2); }
     }
     txt('W/S LETTER  A/D MOVE  OR TYPE', W / 2, 168, DIM, { align: 'center' });
-    txt('ENTER TO SAVE', W / 2, 180, DIM, { align: 'center' });
+    txt('ENTER: SAVE + POST TO GLOBAL BOARD', W / 2, 180, DIM, { align: 'center' });
+    txt('ESC: SKIP', W / 2, 192, DIM, { align: 'center' });
     ctx.fillStyle = PURPLE; ctx.fillRect(0, 216, W, 32);
   }
 
@@ -684,6 +746,7 @@
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+  fetchGlobal();
 
   // exposed for automated testing
   JA.debug = {
