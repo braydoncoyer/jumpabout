@@ -122,7 +122,7 @@
 
   // ---- game state -----------------------------------------------------------
   var state = 'title', stateT = 0;
-  var menu = { idx: 0, players: 1, speed: 2, level: 1 };
+  var menu = { idx: 0, players: 1, speed: 4, level: 1 };
   var SETTINGS_KEY = 'jumpabout.settings';
 
   // players and speed persist between visits (the starting level does not)
